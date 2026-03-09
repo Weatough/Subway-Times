@@ -5,8 +5,11 @@ Fetches uptown Q train arrivals at Parkside Avenue (MTA GTFS-RT feed)
 and displays each arrival time centred on the full 7-row display,
 lingering for 4 seconds then scrolling to the next.
 
+Glyphs are rendered at runtime using Pillow from Liberation Sans Bold,
+giving clean, natural-looking digits across the full 7-pixel display height.
+
 Requirements:
-    pip3 install requests protobuf gtfs-realtime-bindings unicornhatmini
+    pip3 install requests protobuf gtfs-realtime-bindings unicornhatmini pillow
 
 MTA API Key:
     Register free at https://api.mta.info/ and set the env var:
@@ -18,6 +21,7 @@ import sys
 import time
 import datetime
 import requests
+from PIL import Image, ImageDraw, ImageFont
 from google.transit import gtfs_realtime_pb2
 
 # ── Optional: fall back gracefully if not on a Pi with the HAT ──────────────
@@ -48,164 +52,97 @@ COLOR_YELLOW = (255, 220,   0)   # 6-8 min  -> yellow
 COLOR_GREEN  = (  0, 220,   0)   # 9+ min   -> green
 COLOR_NONE   = ( 80,  80,  80)   # no data  -> grey
 
-# ── 7-tall x 4-wide pixel font ───────────────────────────────────────────────
-# Each entry is a list of column integers (one int per pixel column).
-# 7 bits per column: bit 6 (MSB) = top row, bit 0 = bottom row.
-# Every digit glyph is exactly 4 columns wide for consistency.
-# 'm' is 5 columns. ' ' gap is 2 columns. '-' is 4 columns.
-#
-#  Bit layout visualised (7 rows):
-#    bit 6  ██████
-#    bit 5  ██████
-#    bit 4  ██████
-#    bit 3  ██████
-#    bit 2  ██████
-#    bit 1  ██████
-#    bit 0  ██████
+# ── Pillow font setup ────────────────────────────────────────────────────────
+# Liberation Sans Bold at size 9 renders all digits cleanly at exactly
+# 7 pixels tall, with good stroke weight and open counters.
+_FONT_CANDIDATES = [
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+]
+_FONT_SIZE  = 9
+_THRESHOLD  = 80   # brightness threshold (0–255) for on/off pixel
 
-FONT7 = {
-    # 0:  ░███░
-    #     █░░░█
-    #     █░░░█
-    #     █░░░█
-    #     █░░░█
-    #     █░░░█
-    #     ░███░
-    '0': [0b0111110,
-          0b1000001,
-          0b1000001,
-          0b0111110],
+def _load_font():
+    for path in _FONT_CANDIDATES:
+        if os.path.exists(path):
+            try:
+                f = ImageFont.truetype(path, _FONT_SIZE)
+                print(f"Font loaded: {path} @ {_FONT_SIZE}pt")
+                return f
+            except Exception:
+                pass
+    print("Warning: no TTF font found, falling back to Pillow default bitmap font.")
+    return ImageFont.load_default()
 
-    # 1:  ░░█░
-    #     ░██░
-    #     ░░█░
-    #     ░░█░
-    #     ░░█░
-    #     ░░█░
-    #     ░███
-    '1': [0b0000010,
-          0b1111111,
-          0b0000001,
-          0b0000011],
+_FONT = _load_font()
 
-    # 2:  ░███░
-    #     █░░░█
-    #     ░░░░█
-    #     ░░██░
-    #     ░█░░░
-    #     █░░░░
-    #     █████
-    '2': [0b1000011,
-          0b1000101,
-          0b1001001,
-          0b0110001],
+# ── Glyph rendering via Pillow ────────────────────────────────────────────────
 
-    # 3:  ░███░
-    #     █░░░█
-    #     ░░░░█
-    #     ░░██░
-    #     ░░░░█
-    #     █░░░█
-    #     ░███░
-    '3': [0b1000010,
-          0b1001001,
-          0b1001001,
-          0b0110110],
+def _render_char(ch):
+    """
+    Render a single character with Pillow and return a list of column bitmasks.
+    One int per pixel column; 7 bits per int (bit 6 = top row, bit 0 = bottom).
+    The glyph is vertically centred within the 7-row display height.
+    """
+    try:
+        bbox = _FONT.getbbox(ch)
+    except AttributeError:
+        w, h = _FONT.getsize(ch)
+        bbox = (0, 0, w, h)
 
-    # 4:  ░░░█░
-    #     ░░██░
-    #     ░█░█░
-    #     █░░█░
-    #     █████
-    #     ░░░█░
-    #     ░░░█░
-    '4': [0b0011100,
-          0b0100100,
-          0b1111111,
-          0b0000100],
+    char_w    = max(bbox[2] - bbox[0], 1)
+    canvas_h  = DISPLAY_HEIGHT + 10
 
-    # 5:  █████
-    #     █░░░░
-    #     █████
-    #     ░░░░█
-    #     ░░░░█
-    #     █░░░█
-    #     ░███░
-    '5': [0b1111010,
-          0b1001001,
-          0b1001001,
-          0b1000110],
+    # Draw character onto a greyscale canvas with a small top margin
+    img  = Image.new("L", (char_w + 4, canvas_h), 0)
+    draw = ImageDraw.Draw(img)
+    draw.text((-bbox[0], 2), ch, font=_FONT, fill=255)
 
-    # 6:  ░███░
-    #     █░░░░
-    #     █████
-    #     █░░░█
-    #     █░░░█
-    #     █░░░█
-    #     ░███░
-    '6': [0b0111110,
-          0b1001001,
-          0b1001001,
-          0b0000110],
+    # Locate the tight vertical bounds of lit pixels
+    first_row, last_row = canvas_h, 0
+    for y in range(canvas_h):
+        for x in range(img.width):
+            if img.getpixel((x, y)) > _THRESHOLD:
+                first_row = min(first_row, y)
+                last_row  = max(last_row,  y)
 
-    # 7:  █████
-    #     ░░░░█
-    #     ░░░█░
-    #     ░░█░░
-    #     ░█░░░
-    #     ░█░░░
-    #     ░█░░░
-    '7': [0b1000000,
-          0b1000111,
-          0b1111000,
-          0b0000000],
+    if first_row > last_row:
+        return [0, 0]   # blank / space
 
-    # 8:  ░███░
-    #     █░░░█
-    #     █░░░█
-    #     ░███░
-    #     █░░░█
-    #     █░░░█
-    #     ░███░
-    '8': [0b0110110,
-          0b1001001,
-          0b1001001,
-          0b0110110],
+    glyph_h   = last_row - first_row + 1
+    rows_used = min(glyph_h, DISPLAY_HEIGHT)
+    top_pad   = (DISPLAY_HEIGHT - rows_used) // 2   # centre vertically
 
-    # 9:  ░███░
-    #     █░░░█
-    #     █░░░█
-    #     ░████
-    #     ░░░░█
-    #     ░░░░█
-    #     ░███░
-    '9': [0b1110000,
-          0b1001001,
-          0b1001001,
-          0b0111110],
+    cols = []
+    for x in range(img.width):
+        mask = 0
+        for i in range(rows_used):
+            if img.getpixel((x, first_row + i)) > _THRESHOLD:
+                bit = DISPLAY_HEIGHT - 1 - (top_pad + i)
+                if 0 <= bit < DISPLAY_HEIGHT:
+                    mask |= (1 << bit)
+        cols.append(mask)
 
-    # m:  ░░░░░
-    #     ░░░░░
-    #     ███░█
-    #     █░█░█
-    #     █░█░█
-    #     █░█░█
-    #     █░█░█
-    'm': [0b0011111,
-          0b0100000,
-          0b0011100,
-          0b0100000,
-          0b0011111],
+    # Remove blank edge columns
+    while cols and cols[0]  == 0: cols.pop(0)
+    while cols and cols[-1] == 0: cols.pop()
+    return cols if cols else [0, 0]
 
-    ' ': [0b0000000,
-          0b0000000],
 
-    '-': [0b0001000,
-          0b0001000,
-          0b0001000,
-          0b0001000],
-}
+# Pre-warm the glyph cache at import time (zero latency during display loop)
+_GLYPH_CACHE: dict[str, list[int]] = {}
 
+def _glyph(ch: str) -> list[int]:
+    if ch not in _GLYPH_CACHE:
+        _GLYPH_CACHE[ch] = _render_char(ch)
+    return _GLYPH_CACHE[ch]
+
+for _ch in "0123456789m- ":
+    _glyph(_ch)
+
+
+# ── MTA feed ─────────────────────────────────────────────────────────────────
 
 def fetch_arrivals():
     """Return sorted list of minutes-until-arrival for uptown Q trains."""
@@ -247,17 +184,23 @@ def color_for_minutes(m):
     return COLOR_GREEN
 
 
+# ── Column strip builder ──────────────────────────────────────────────────────
+
 def text_to_columns(text, color):
-    """Convert a string to a list of (7-bit mask, color) column tuples."""
+    """
+    Convert a string to a list of (7-bit column mask, RGB color) tuples
+    using Pillow-rendered glyphs. A 1-pixel gap is inserted between chars.
+    """
     cols = []
     for i, ch in enumerate(text):
-        glyph = FONT7.get(ch, FONT7[' '])
-        for mask in glyph:
+        for mask in _glyph(ch):
             cols.append((mask, color))
         if i < len(text) - 1:
-            cols.append((0b0000000, color))  # 1-px gap between chars
+            cols.append((0, color))   # 1-px inter-character gap
     return cols
 
+
+# ── Rendering ────────────────────────────────────────────────────────────────
 
 def render_columns(hat, col_data, offset):
     """Paint DISPLAY_WIDTH columns starting at offset onto the HAT."""
@@ -279,15 +222,17 @@ def centre_offset(col_data):
 
 
 def console_preview(col_data, label=""):
-    """ASCII art preview for terminal debugging."""
-    print(f"  [{label}]")
+    """ASCII art preview printed to the terminal for debugging."""
+    w = len(col_data)
+    print(f"  [{label}]  ({w} columns wide)")
+    print("  +" + "-" * w + "+")
     for row in range(DISPLAY_HEIGHT):
         line = "  |"
         for mask, _ in col_data:
             line += "#" if mask & (1 << (DISPLAY_HEIGHT - 1 - row)) else " "
         line += "|"
         print(line)
-    print()
+    print("  +" + "-" * w + "+\n")
 
 
 def linger(hat, col_data, offset, seconds):
@@ -302,22 +247,23 @@ def linger(hat, col_data, offset, seconds):
 def scroll_to_next(hat, from_cols, to_cols):
     """
     Scroll horizontally from one centred label to the next.
-    Builds a combined strip: [from_cols][gap][to_cols] and scrolls
-    from the centre of from_cols to the centre of to_cols.
+    Builds [from_cols][blank gap][to_cols] and scrolls from the centre
+    of from_cols to the centre of to_cols.
     """
-    gap = [(0b0000000, COLOR_NONE)] * DISPLAY_WIDTH
+    gap      = [(0, COLOR_NONE)] * DISPLAY_WIDTH
     combined = from_cols + gap + to_cols
 
-    start = centre_offset(from_cols)
-    # to_cols starts after from_cols + gap in the combined strip
-    to_start = len(from_cols) + len(gap)
-    end = to_start + centre_offset(to_cols)
+    start   = centre_offset(from_cols)
+    to_base = len(from_cols) + len(gap)
+    end     = to_base + centre_offset(to_cols)
 
     for offset in range(start, end + 1):
         if hat:
             render_columns(hat, combined, offset)
         time.sleep(SCROLL_SPEED)
 
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _now():
     return datetime.datetime.now().strftime("%H:%M:%S")
@@ -330,6 +276,8 @@ def console_display(arrivals):
         parts = [f"{m} min" for m in arrivals]
         print(f"[{_now()}] Uptown Q @ Parkside Ave: {' | '.join(parts)}")
 
+
+# ── Main loop ─────────────────────────────────────────────────────────────────
 
 def main():
     if not MTA_API_KEY:
@@ -373,19 +321,19 @@ def main():
                 cols  = text_to_columns(f"{m}m", color)
                 labels.append((cols, color, m))
 
-            # Cycle through labels: linger -> scroll -> linger -> scroll -> ...
+            # Cycle: linger → scroll → linger → scroll → ...
             for i, (cols, color, m) in enumerate(labels):
                 offset = centre_offset(cols)
                 console_preview(cols, label=f"{m}m")
 
-                # Hold this arrival on screen
+                # Hold this arrival on screen for LINGER_SECS
                 linger(hat, cols, offset, LINGER_SECS)
 
-                # Re-fetch check before scrolling
+                # Check for a fresh fetch before scrolling
                 if time.time() - last_fetch >= REFRESH_SECS:
                     break
 
-                # Scroll to the next label (wrap around to first after last)
+                # Scroll to next label (wraps to first after last)
                 next_cols, _, _ = labels[(i + 1) % len(labels)]
                 scroll_to_next(hat, cols, next_cols)
 
