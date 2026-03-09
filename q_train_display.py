@@ -138,7 +138,7 @@ def _glyph(ch: str) -> list[int]:
         _GLYPH_CACHE[ch] = _render_char(ch)
     return _GLYPH_CACHE[ch]
 
-for _ch in "0123456789m- ":
+for _ch in "0123456789- ":
     _glyph(_ch)
 
 
@@ -203,13 +203,19 @@ def text_to_columns(text, color):
 # ── Rendering ────────────────────────────────────────────────────────────────
 
 def render_columns(hat, col_data, offset):
-    """Paint DISPLAY_WIDTH columns starting at offset onto the HAT."""
+    """
+    Paint DISPLAY_WIDTH columns starting at offset onto the HAT.
+    When col_data is shorter than DISPLAY_WIDTH and offset=0, the glyph
+    is centred horizontally by computing a left-pad.
+    """
     hat.clear()
+    # When the strip is shorter than the display, centre it visually
+    left_pad = max(0, (DISPLAY_WIDTH - len(col_data)) // 2) if offset == 0 else 0
     for x in range(DISPLAY_WIDTH):
-        idx = offset + x
-        if idx < 0 or idx >= len(col_data):
+        src = x - left_pad + offset
+        if src < 0 or src >= len(col_data):
             continue
-        mask, color = col_data[idx]
+        mask, color = col_data[src]
         for row in range(DISPLAY_HEIGHT):
             if mask & (1 << (DISPLAY_HEIGHT - 1 - row)):
                 hat.set_pixel(x, row, *color)
@@ -219,6 +225,18 @@ def render_columns(hat, col_data, offset):
 def centre_offset(col_data):
     """Return the scroll offset that centres col_data on the display."""
     return max(0, (len(col_data) - DISPLAY_WIDTH) // 2)
+
+
+def clamp_to_display(col_data):
+    """
+    Trim col_data to at most DISPLAY_WIDTH columns, centred.
+    For our digit-only labels this is effectively a no-op (max ~11 cols)
+    but acts as a hard safety cap.
+    """
+    if len(col_data) <= DISPLAY_WIDTH:
+        return col_data
+    start = (len(col_data) - DISPLAY_WIDTH) // 2
+    return col_data[start:start + DISPLAY_WIDTH]
 
 
 def console_preview(col_data, label=""):
@@ -244,20 +262,41 @@ def linger(hat, col_data, offset, seconds):
         time.sleep(SCROLL_SPEED)
 
 
-def scroll_to_next(hat, from_cols, to_cols):
-    """
-    Scroll horizontally from one centred label to the next.
-    Builds [from_cols][blank gap][to_cols] and scrolls from the centre
-    of from_cols to the centre of to_cols.
-    """
-    gap      = [(0, COLOR_NONE)] * DISPLAY_WIDTH
-    combined = from_cols + gap + to_cols
+def _pad_centre(col_data):
+    """Pad col_data with blank columns on each side to DISPLAY_WIDTH, centring it."""
+    if len(col_data) >= DISPLAY_WIDTH:
+        return col_data
+    total_pad = DISPLAY_WIDTH - len(col_data)
+    left  = total_pad // 2
+    right = total_pad - left
+    blank = (0, COLOR_NONE)
+    return [blank] * left + list(col_data) + [blank] * right
 
-    start   = centre_offset(from_cols)
-    to_base = len(from_cols) + len(gap)
-    end     = to_base + centre_offset(to_cols)
 
-    for offset in range(start, end + 1):
+def scroll_to_next(hat, from_cols, to_cols, direction="left"):
+    """
+    Scroll horizontally between two labels, each padded to DISPLAY_WIDTH so
+    they are centred.
+    direction="left"  — to_cols arrives from the right (normal forward)
+    direction="right" — to_cols arrives from the left (wrap-around)
+    """
+    from_padded = _pad_centre(from_cols)
+    to_padded   = _pad_centre(to_cols)
+    gap         = [(0, COLOR_NONE)] * DISPLAY_WIDTH
+
+    if direction == "left":
+        combined = from_padded + gap + to_padded
+        start    = 0                              # from is at position 0
+        end      = DISPLAY_WIDTH + 0              # to   is at position DISPLAY_WIDTH+gap
+        end      = len(from_padded) + len(gap)
+        offsets  = range(start, end + 1)
+    else:
+        combined = to_padded + gap + from_padded
+        start    = len(to_padded) + len(gap)      # from is at the right end
+        end      = 0                              # to   is at position 0
+        offsets  = range(start, end - 1, -1)
+
+    for offset in offsets:
         if hat:
             render_columns(hat, combined, offset)
         time.sleep(SCROLL_SPEED)
@@ -314,17 +353,18 @@ def main():
                 time.sleep(1.0)
                 continue
 
-            # Build column data for each arrival label (e.g. "2m", "9m", "14m")
+            # Build column data for each arrival label (digits only, e.g. "2", "9", "14")
             labels = []
             for m in arrivals:
                 color = color_for_minutes(m)
-                cols  = text_to_columns(f"{m}m", color)
+                cols  = clamp_to_display(text_to_columns(str(m), color))
                 labels.append((cols, color, m))
 
             # Cycle: linger → scroll → linger → scroll → ...
+            # Last label scrolls RIGHT back to the first (wrap-around).
             for i, (cols, color, m) in enumerate(labels):
                 offset = centre_offset(cols)
-                console_preview(cols, label=f"{m}m")
+                console_preview(cols, label=str(m))
 
                 # Hold this arrival on screen for LINGER_SECS
                 linger(hat, cols, offset, LINGER_SECS)
@@ -333,9 +373,11 @@ def main():
                 if time.time() - last_fetch >= REFRESH_SECS:
                     break
 
-                # Scroll to next label (wraps to first after last)
                 next_cols, _, _ = labels[(i + 1) % len(labels)]
-                scroll_to_next(hat, cols, next_cols)
+                is_last = (i == len(labels) - 1)
+                # Last item wraps back to first scrolling right-to-left (right direction)
+                scroll_to_next(hat, cols, next_cols,
+                               direction="right" if is_last else "left")
 
     except KeyboardInterrupt:
         print("\nExiting.")
