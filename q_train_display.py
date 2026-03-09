@@ -2,7 +2,7 @@
 """
 Q Train Arrival Display for Unicorn HAT Mini
 Fetches uptown Q train arrivals at Parkside Avenue (MTA GTFS-RT feed)
-and scrolls the minutes-until-arrival across the display.
+and scrolls the minutes-until-arrival across the full 7-row display.
 
 Requirements:
     pip3 install requests protobuf gtfs-realtime-bindings unicornhatmini
@@ -15,7 +15,6 @@ MTA API Key:
 import os
 import sys
 import time
-import math
 import datetime
 import requests
 from google.transit import gtfs_realtime_pb2
@@ -29,41 +28,111 @@ except ImportError:
     HAT_AVAILABLE = False
 
 # ── MTA Config ───────────────────────────────────────────────────────────────
-MTA_API_KEY   = os.environ.get("MTA_API_KEY", "")
-# GTFS-RT feed for B/D/F/M/N/Q/R/W lines
-FEED_URL      = "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs-nqrw"
-# GTFS stop IDs: Parkside Avenue uptown (Manhattan-bound) = Q05N
-STOP_ID       = "Q05N"
-ROUTE_ID      = "Q"
-REFRESH_SECS  = 30   # how often to re-fetch from the MTA
-MAX_ARRIVALS  = 3    # how many upcoming trains to show
+MTA_API_KEY  = os.environ.get("MTA_API_KEY", "")
+FEED_URL     = "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs-nqrw"
+STOP_ID      = "Q05N"   # Parkside Ave – uptown / Manhattan-bound platform
+ROUTE_ID     = "Q"
+REFRESH_SECS = 30
+MAX_ARRIVALS = 3
 
 # ── Display Config ───────────────────────────────────────────────────────────
-BRIGHTNESS    = 0.3  # 0.0 – 1.0
-SCROLL_SPEED  = 0.07 # seconds per column shift while scrolling
-# Colour per minute bucket  (R, G, B)
-COLOR_NOW     = (255,   0,   0)   # ≤ 1 min  → red (boarding!)
-COLOR_SOON    = (255, 140,   0)   # 2–4 min  → orange
-COLOR_OK      = (  0, 255,   0)   # 5–9 min  → green
-COLOR_FAR     = (  0, 100, 255)   # ≥10 min  → blue
+DISPLAY_WIDTH  = 17
+DISPLAY_HEIGHT = 7
+BRIGHTNESS     = 0.3
+SCROLL_SPEED   = 0.07   # seconds per column step
 
-# ── Tiny 4-row pixel font (digits 0-9, colon, space, 'm') ───────────────────
-# Each glyph is a list of column bit-masks, MSB = top row.
-FONT = {
-    '0': [0b1110, 0b1010, 0b1010, 0b1110],
-    '1': [0b0100, 0b1100, 0b0100, 0b1110],
-    '2': [0b1110, 0b0010, 0b0100, 0b1110],
-    '3': [0b1110, 0b0110, 0b0010, 0b1110],
-    '4': [0b1010, 0b1110, 0b0010, 0b0010],
-    '5': [0b1110, 0b1100, 0b0010, 0b1110],
-    '6': [0b1110, 0b1100, 0b1010, 0b1110],
-    '7': [0b1110, 0b0010, 0b0100, 0b0100],
-    '8': [0b1110, 0b1110, 0b1010, 0b1110],
-    '9': [0b1110, 0b1010, 0b0110, 0b0010],
-    'm': [0b0000, 0b1010, 0b1010, 0b1010],
-    ' ': [0b0000, 0b0000, 0b0000, 0b0000],
-    '-': [0b0000, 0b1110, 0b0000, 0b0000],
+COLOR_NOW  = (255,   0,   0)   # ≤ 1 min  → red   (board now!)
+COLOR_SOON = (255, 140,   0)   # 2–4 min  → orange
+COLOR_OK   = (  0, 255,   0)   # 5–9 min  → green
+COLOR_FAR  = (  0, 100, 255)   # ≥10 min  → blue
+COLOR_NONE = ( 80,  80,  80)   # no data  → grey
+
+# ── 7-row pixel font ─────────────────────────────────────────────────────────
+# Each glyph is a list of column integers, one per column of the character.
+# Bit 6 (MSB of 7 bits) = top row, bit 0 = bottom row.
+# Digits are 4 columns wide; 'm' is 5; space is 3; '-' is 4.
+
+FONT7 = {
+    '0': [
+        0b1111110,
+        0b1000010,
+        0b1000010,
+        0b1111110,
+    ],
+    '1': [
+        0b0000100,
+        0b1111110,
+        0b0000000,
+        0b0000000,
+    ],
+    '2': [
+        0b1000110,
+        0b1001010,
+        0b1001010,
+        0b1110010,
+    ],
+    '3': [
+        0b1000010,
+        0b1001010,
+        0b1001010,
+        0b1111110,
+    ],
+    '4': [
+        0b0111000,
+        0b0001000,
+        0b0001000,
+        0b1111110,
+    ],
+    '5': [
+        0b1110010,
+        0b1001010,
+        0b1001010,
+        0b1001110,
+    ],
+    '6': [
+        0b1111110,
+        0b1001010,
+        0b1001010,
+        0b1001110,
+    ],
+    '7': [
+        0b1000000,
+        0b1000110,
+        0b1111000,
+        0b0000000,
+    ],
+    '8': [
+        0b1111110,
+        0b1001010,
+        0b1001010,
+        0b1111110,
+    ],
+    '9': [
+        0b1110010,
+        0b1001010,
+        0b1001010,
+        0b1111110,
+    ],
+    'm': [
+        0b0111110,
+        0b0100000,
+        0b0011110,
+        0b0100000,
+        0b0111110,
+    ],
+    ' ': [
+        0b0000000,
+        0b0000000,
+        0b0000000,
+    ],
+    '-': [
+        0b0001000,
+        0b0001000,
+        0b0001000,
+        0b0001000,
+    ],
 }
+
 
 def fetch_arrivals():
     """Return sorted list of minutes-until-arrival for uptown Q trains."""
@@ -100,15 +169,17 @@ def fetch_arrivals():
 
 
 def color_for_minutes(m):
-    if m <= 1:   return COLOR_NOW
-    if m <= 4:   return COLOR_SOON
-    if m <= 9:   return COLOR_OK
+    if m <= 1:  return COLOR_NOW
+    if m <= 4:  return COLOR_SOON
+    if m <= 9:  return COLOR_OK
     return COLOR_FAR
 
 
 def build_pixel_columns(arrivals):
-    """Convert a list of minute values into a list of (col_pixels, color)."""
-    # Build text like "2m 7m 14m" with colours per segment
+    """
+    Build a list of (7-bit column mask, RGB color) tuples representing
+    the full scrollable message at 7 pixels tall.
+    """
     segments = []
     for i, m in enumerate(arrivals):
         label = f"{m}m"
@@ -117,41 +188,44 @@ def build_pixel_columns(arrivals):
         segments.append((label, color_for_minutes(m)))
 
     if not segments:
-        segments = [("-", (80, 80, 80))]
+        segments = [("-", COLOR_NONE)]
 
-    # Expand into (4-bit column mask, color) pairs
-    col_data = []  # list of (mask_int, color_tuple)
+    col_data = []
     for text, color in segments:
         for ch in text:
-            glyph = FONT.get(ch, FONT[' '])
+            glyph = FONT7.get(ch, FONT7[' '])
             for col_mask in glyph:
                 col_data.append((col_mask, color))
-            col_data.append((0b0000, color))   # 1-pixel gap between chars
+            col_data.append((0b0000000, color))  # 1-pixel gap between chars
 
     return col_data
 
 
-def render_column(hat, display_cols, col_data, offset):
-    """Write one frame: 17 display columns starting at offset in col_data."""
+def render_frame(hat, col_data, offset):
+    """Render one scrolled frame onto the HAT Mini."""
     hat.clear()
-    width = 17  # UnicornHATMini width
-    height = 7  # UnicornHATMini height
-
-    # Centre the 4-row font vertically (rows 1-4 of the 7-row display)
-    row_offset = 1
-
-    for x in range(width):
+    for x in range(DISPLAY_WIDTH):
         data_idx = offset + x
         if data_idx >= len(col_data):
             break
         mask, color = col_data[data_idx]
-        for bit in range(4):
-            if mask & (1 << (3 - bit)):
-                y = row_offset + bit
-                if y < height:
-                    hat.set_pixel(x, y, *color)
-
+        for row in range(DISPLAY_HEIGHT):
+            # bit 6 → row 0 (top), bit 0 → row 6 (bottom)
+            if mask & (1 << (DISPLAY_HEIGHT - 1 - row)):
+                hat.set_pixel(x, row, *color)
     hat.show()
+
+
+def console_preview(col_data):
+    """Print an ASCII preview of the pixel data to the terminal."""
+    print("┌" + "─" * len(col_data) + "┐")
+    for row in range(DISPLAY_HEIGHT):
+        line = "│"
+        for mask, _ in col_data:
+            line += "█" if mask & (1 << (DISPLAY_HEIGHT - 1 - row)) else " "
+        line += "│"
+        print(line)
+    print("└" + "─" * len(col_data) + "┘")
 
 
 def _now():
@@ -161,9 +235,9 @@ def _now():
 def console_display(arrivals):
     if not arrivals:
         print(f"[{_now()}] No upcoming Q trains found.")
-        return
-    parts = [f"{m} min" for m in arrivals]
-    print(f"[{_now()}] Uptown Q @ Parkside Ave: {' | '.join(parts)}")
+    else:
+        parts = [f"{m} min" for m in arrivals]
+        print(f"[{_now()}] Uptown Q @ Parkside Ave: {' | '.join(parts)}")
 
 
 def main():
@@ -179,10 +253,10 @@ def main():
         hat.clear()
         hat.show()
 
-    arrivals       = []
-    last_fetch     = 0
-    col_data       = []
-    scroll_offset  = 0
+    arrivals      = []
+    last_fetch    = 0
+    col_data      = []
+    scroll_offset = 0
 
     print(f"Q Train display running. Stop: {STOP_ID}  Refresh: {REFRESH_SECS}s")
     print("Press Ctrl-C to quit.\n")
@@ -193,14 +267,15 @@ def main():
 
             # Re-fetch from MTA every REFRESH_SECS seconds
             if now - last_fetch >= REFRESH_SECS:
-                arrivals   = fetch_arrivals()
-                last_fetch = now
-                col_data   = build_pixel_columns(arrivals)
+                arrivals      = fetch_arrivals()
+                last_fetch    = now
+                col_data      = build_pixel_columns(arrivals)
                 scroll_offset = 0
                 console_display(arrivals)
+                console_preview(col_data)
 
             if hat and col_data:
-                render_column(hat, 17, col_data, scroll_offset)
+                render_frame(hat, col_data, scroll_offset)
                 scroll_offset += 1
                 if scroll_offset >= len(col_data):
                     scroll_offset = 0   # loop the scroll
