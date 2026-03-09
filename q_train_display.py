@@ -43,11 +43,10 @@ BRIGHTNESS     = 0.3
 SCROLL_SPEED   = 0.055  # seconds per column step while scrolling
 LINGER_SECS    = 4.0    # seconds to hold each arrival time on screen
 
-COLOR_NOW  = (255,   0,   0)   # <= 1 min  -> red   (board now!)
-COLOR_SOON = (255, 140,   0)   # 2-4 min   -> orange
-COLOR_OK   = (  0, 220,   0)   # 5-9 min   -> green
-COLOR_FAR  = (  0, 100, 255)   # >=10 min  -> blue
-COLOR_NONE = ( 80,  80,  80)   # no data   -> grey
+COLOR_RED    = (255,   0,   0)   # 1-5 min  -> red
+COLOR_YELLOW = (255, 220,   0)   # 6-8 min  -> yellow
+COLOR_GREEN  = (  0, 220,   0)   # 9+ min   -> green
+COLOR_NONE   = ( 80,  80,  80)   # no data  -> grey
 
 # ── 7-tall x 4-wide pixel font ───────────────────────────────────────────────
 # Each entry is a list of column integers (one int per pixel column).
@@ -77,17 +76,17 @@ FONT7 = {
           0b1000001,
           0b0111110],
 
-    # 1:  ░░█░░
-    #     ░██░░
-    #     ░░█░░
-    #     ░░█░░
-    #     ░░█░░
-    #     ░░█░░
-    #     ░███░
+    # 1:  ░░█░
+    #     ░██░
+    #     ░░█░
+    #     ░░█░
+    #     ░░█░
+    #     ░░█░
+    #     ░███
     '1': [0b0000010,
-          0b0000001,
           0b1111111,
-          0b0000000],
+          0b0000001,
+          0b0000011],
 
     # 2:  ░███░
     #     █░░░█
@@ -243,10 +242,9 @@ def fetch_arrivals():
 
 
 def color_for_minutes(m):
-    if m <= 1:  return COLOR_NOW
-    if m <= 4:  return COLOR_SOON
-    if m <= 9:  return COLOR_OK
-    return COLOR_FAR
+    if m <= 5:  return COLOR_RED
+    if m <= 8:  return COLOR_YELLOW
+    return COLOR_GREEN
 
 
 def text_to_columns(text, color):
