@@ -2,7 +2,8 @@
 """
 Q Train Arrival Display for Unicorn HAT Mini
 Fetches uptown Q train arrivals at Parkside Avenue (MTA GTFS-RT feed)
-and scrolls the minutes-until-arrival across the full 7-row display.
+and displays each arrival time centred on the full 7-row display,
+lingering for 4 seconds then scrolling to the next.
 
 Requirements:
     pip3 install requests protobuf gtfs-realtime-bindings unicornhatmini
@@ -39,98 +40,171 @@ MAX_ARRIVALS = 3
 DISPLAY_WIDTH  = 17
 DISPLAY_HEIGHT = 7
 BRIGHTNESS     = 0.3
-SCROLL_SPEED   = 0.07   # seconds per column step
+SCROLL_SPEED   = 0.055  # seconds per column step while scrolling
+LINGER_SECS    = 4.0    # seconds to hold each arrival time on screen
 
-COLOR_NOW  = (255,   0,   0)   # ≤ 1 min  → red   (board now!)
-COLOR_SOON = (255, 140,   0)   # 2–4 min  → orange
-COLOR_OK   = (  0, 255,   0)   # 5–9 min  → green
-COLOR_FAR  = (  0, 100, 255)   # ≥10 min  → blue
-COLOR_NONE = ( 80,  80,  80)   # no data  → grey
+COLOR_NOW  = (255,   0,   0)   # <= 1 min  -> red   (board now!)
+COLOR_SOON = (255, 140,   0)   # 2-4 min   -> orange
+COLOR_OK   = (  0, 220,   0)   # 5-9 min   -> green
+COLOR_FAR  = (  0, 100, 255)   # >=10 min  -> blue
+COLOR_NONE = ( 80,  80,  80)   # no data   -> grey
 
-# ── 7-row pixel font ─────────────────────────────────────────────────────────
-# Each glyph is a list of column integers, one per column of the character.
-# Bit 6 (MSB of 7 bits) = top row, bit 0 = bottom row.
-# Digits are 4 columns wide; 'm' is 5; space is 3; '-' is 4.
+# ── 7-tall x 4-wide pixel font ───────────────────────────────────────────────
+# Each entry is a list of column integers (one int per pixel column).
+# 7 bits per column: bit 6 (MSB) = top row, bit 0 = bottom row.
+# Every digit glyph is exactly 4 columns wide for consistency.
+# 'm' is 5 columns. ' ' gap is 2 columns. '-' is 4 columns.
+#
+#  Bit layout visualised (7 rows):
+#    bit 6  ██████
+#    bit 5  ██████
+#    bit 4  ██████
+#    bit 3  ██████
+#    bit 2  ██████
+#    bit 1  ██████
+#    bit 0  ██████
 
 FONT7 = {
-    '0': [
-        0b1111110,
-        0b1000010,
-        0b1000010,
-        0b1111110,
-    ],
-    '1': [
-        0b0000100,
-        0b1111110,
-        0b0000000,
-        0b0000000,
-    ],
-    '2': [
-        0b1000110,
-        0b1001010,
-        0b1001010,
-        0b1110010,
-    ],
-    '3': [
-        0b1000010,
-        0b1001010,
-        0b1001010,
-        0b1111110,
-    ],
-    '4': [
-        0b0111000,
-        0b0001000,
-        0b0001000,
-        0b1111110,
-    ],
-    '5': [
-        0b1110010,
-        0b1001010,
-        0b1001010,
-        0b1001110,
-    ],
-    '6': [
-        0b1111110,
-        0b1001010,
-        0b1001010,
-        0b1001110,
-    ],
-    '7': [
-        0b1000000,
-        0b1000110,
-        0b1111000,
-        0b0000000,
-    ],
-    '8': [
-        0b1111110,
-        0b1001010,
-        0b1001010,
-        0b1111110,
-    ],
-    '9': [
-        0b1110010,
-        0b1001010,
-        0b1001010,
-        0b1111110,
-    ],
-    'm': [
-        0b0111110,
-        0b0100000,
-        0b0011110,
-        0b0100000,
-        0b0111110,
-    ],
-    ' ': [
-        0b0000000,
-        0b0000000,
-        0b0000000,
-    ],
-    '-': [
-        0b0001000,
-        0b0001000,
-        0b0001000,
-        0b0001000,
-    ],
+    # 0:  ░███░
+    #     █░░░█
+    #     █░░░█
+    #     █░░░█
+    #     █░░░█
+    #     █░░░█
+    #     ░███░
+    '0': [0b0111110,
+          0b1000001,
+          0b1000001,
+          0b0111110],
+
+    # 1:  ░░█░░
+    #     ░██░░
+    #     ░░█░░
+    #     ░░█░░
+    #     ░░█░░
+    #     ░░█░░
+    #     ░███░
+    '1': [0b0000010,
+          0b0000001,
+          0b1111111,
+          0b0000000],
+
+    # 2:  ░███░
+    #     █░░░█
+    #     ░░░░█
+    #     ░░██░
+    #     ░█░░░
+    #     █░░░░
+    #     █████
+    '2': [0b1000011,
+          0b1000101,
+          0b1001001,
+          0b0110001],
+
+    # 3:  ░███░
+    #     █░░░█
+    #     ░░░░█
+    #     ░░██░
+    #     ░░░░█
+    #     █░░░█
+    #     ░███░
+    '3': [0b1000010,
+          0b1001001,
+          0b1001001,
+          0b0110110],
+
+    # 4:  ░░░█░
+    #     ░░██░
+    #     ░█░█░
+    #     █░░█░
+    #     █████
+    #     ░░░█░
+    #     ░░░█░
+    '4': [0b0011100,
+          0b0100100,
+          0b1111111,
+          0b0000100],
+
+    # 5:  █████
+    #     █░░░░
+    #     █████
+    #     ░░░░█
+    #     ░░░░█
+    #     █░░░█
+    #     ░███░
+    '5': [0b1111010,
+          0b1001001,
+          0b1001001,
+          0b1000110],
+
+    # 6:  ░███░
+    #     █░░░░
+    #     █████
+    #     █░░░█
+    #     █░░░█
+    #     █░░░█
+    #     ░███░
+    '6': [0b0111110,
+          0b1001001,
+          0b1001001,
+          0b0000110],
+
+    # 7:  █████
+    #     ░░░░█
+    #     ░░░█░
+    #     ░░█░░
+    #     ░█░░░
+    #     ░█░░░
+    #     ░█░░░
+    '7': [0b1000000,
+          0b1000111,
+          0b1111000,
+          0b0000000],
+
+    # 8:  ░███░
+    #     █░░░█
+    #     █░░░█
+    #     ░███░
+    #     █░░░█
+    #     █░░░█
+    #     ░███░
+    '8': [0b0110110,
+          0b1001001,
+          0b1001001,
+          0b0110110],
+
+    # 9:  ░███░
+    #     █░░░█
+    #     █░░░█
+    #     ░████
+    #     ░░░░█
+    #     ░░░░█
+    #     ░███░
+    '9': [0b1110000,
+          0b1001001,
+          0b1001001,
+          0b0111110],
+
+    # m:  ░░░░░
+    #     ░░░░░
+    #     ███░█
+    #     █░█░█
+    #     █░█░█
+    #     █░█░█
+    #     █░█░█
+    'm': [0b0011111,
+          0b0100000,
+          0b0011100,
+          0b0100000,
+          0b0011111],
+
+    ' ': [0b0000000,
+          0b0000000],
+
+    '-': [0b0001000,
+          0b0001000,
+          0b0001000,
+          0b0001000],
 }
 
 
@@ -175,57 +249,76 @@ def color_for_minutes(m):
     return COLOR_FAR
 
 
-def build_pixel_columns(arrivals):
-    """
-    Build a list of (7-bit column mask, RGB color) tuples representing
-    the full scrollable message at 7 pixels tall.
-    """
-    segments = []
-    for i, m in enumerate(arrivals):
-        label = f"{m}m"
-        if i:
-            label = " " + label
-        segments.append((label, color_for_minutes(m)))
-
-    if not segments:
-        segments = [("-", COLOR_NONE)]
-
-    col_data = []
-    for text, color in segments:
-        for ch in text:
-            glyph = FONT7.get(ch, FONT7[' '])
-            for col_mask in glyph:
-                col_data.append((col_mask, color))
-            col_data.append((0b0000000, color))  # 1-pixel gap between chars
-
-    return col_data
+def text_to_columns(text, color):
+    """Convert a string to a list of (7-bit mask, color) column tuples."""
+    cols = []
+    for i, ch in enumerate(text):
+        glyph = FONT7.get(ch, FONT7[' '])
+        for mask in glyph:
+            cols.append((mask, color))
+        if i < len(text) - 1:
+            cols.append((0b0000000, color))  # 1-px gap between chars
+    return cols
 
 
-def render_frame(hat, col_data, offset):
-    """Render one scrolled frame onto the HAT Mini."""
+def render_columns(hat, col_data, offset):
+    """Paint DISPLAY_WIDTH columns starting at offset onto the HAT."""
     hat.clear()
     for x in range(DISPLAY_WIDTH):
-        data_idx = offset + x
-        if data_idx >= len(col_data):
-            break
-        mask, color = col_data[data_idx]
+        idx = offset + x
+        if idx < 0 or idx >= len(col_data):
+            continue
+        mask, color = col_data[idx]
         for row in range(DISPLAY_HEIGHT):
-            # bit 6 → row 0 (top), bit 0 → row 6 (bottom)
             if mask & (1 << (DISPLAY_HEIGHT - 1 - row)):
                 hat.set_pixel(x, row, *color)
     hat.show()
 
 
-def console_preview(col_data):
-    """Print an ASCII preview of the pixel data to the terminal."""
-    print("┌" + "─" * len(col_data) + "┐")
+def centre_offset(col_data):
+    """Return the scroll offset that centres col_data on the display."""
+    return max(0, (len(col_data) - DISPLAY_WIDTH) // 2)
+
+
+def console_preview(col_data, label=""):
+    """ASCII art preview for terminal debugging."""
+    print(f"  [{label}]")
     for row in range(DISPLAY_HEIGHT):
-        line = "│"
+        line = "  |"
         for mask, _ in col_data:
-            line += "█" if mask & (1 << (DISPLAY_HEIGHT - 1 - row)) else " "
-        line += "│"
+            line += "#" if mask & (1 << (DISPLAY_HEIGHT - 1 - row)) else " "
+        line += "|"
         print(line)
-    print("└" + "─" * len(col_data) + "┘")
+    print()
+
+
+def linger(hat, col_data, offset, seconds):
+    """Hold a frame steady for the given number of seconds."""
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if hat:
+            render_columns(hat, col_data, offset)
+        time.sleep(SCROLL_SPEED)
+
+
+def scroll_to_next(hat, from_cols, to_cols):
+    """
+    Scroll horizontally from one centred label to the next.
+    Builds a combined strip: [from_cols][gap][to_cols] and scrolls
+    from the centre of from_cols to the centre of to_cols.
+    """
+    gap = [(0b0000000, COLOR_NONE)] * DISPLAY_WIDTH
+    combined = from_cols + gap + to_cols
+
+    start = centre_offset(from_cols)
+    # to_cols starts after from_cols + gap in the combined strip
+    to_start = len(from_cols) + len(gap)
+    end = to_start + centre_offset(to_cols)
+
+    for offset in range(start, end + 1):
+        if hat:
+            render_columns(hat, combined, offset)
+        time.sleep(SCROLL_SPEED)
 
 
 def _now():
@@ -253,34 +346,50 @@ def main():
         hat.clear()
         hat.show()
 
-    arrivals      = []
-    last_fetch    = 0
-    col_data      = []
-    scroll_offset = 0
-
     print(f"Q Train display running. Stop: {STOP_ID}  Refresh: {REFRESH_SECS}s")
     print("Press Ctrl-C to quit.\n")
 
+    last_fetch = 0
+    arrivals   = []
+
     try:
         while True:
-            now = time.time()
-
-            # Re-fetch from MTA every REFRESH_SECS seconds
-            if now - last_fetch >= REFRESH_SECS:
-                arrivals      = fetch_arrivals()
-                last_fetch    = now
-                col_data      = build_pixel_columns(arrivals)
-                scroll_offset = 0
+            # Refresh arrivals from MTA if due
+            if time.time() - last_fetch >= REFRESH_SECS:
+                arrivals   = fetch_arrivals()
+                last_fetch = time.time()
                 console_display(arrivals)
-                console_preview(col_data)
 
-            if hat and col_data:
-                render_frame(hat, col_data, scroll_offset)
-                scroll_offset += 1
-                if scroll_offset >= len(col_data):
-                    scroll_offset = 0   # loop the scroll
+            if not arrivals:
+                cols   = text_to_columns("-", COLOR_NONE)
+                offset = centre_offset(cols)
+                if hat:
+                    render_columns(hat, cols, offset)
+                time.sleep(1.0)
+                continue
 
-            time.sleep(SCROLL_SPEED)
+            # Build column data for each arrival label (e.g. "2m", "9m", "14m")
+            labels = []
+            for m in arrivals:
+                color = color_for_minutes(m)
+                cols  = text_to_columns(f"{m}m", color)
+                labels.append((cols, color, m))
+
+            # Cycle through labels: linger -> scroll -> linger -> scroll -> ...
+            for i, (cols, color, m) in enumerate(labels):
+                offset = centre_offset(cols)
+                console_preview(cols, label=f"{m}m")
+
+                # Hold this arrival on screen
+                linger(hat, cols, offset, LINGER_SECS)
+
+                # Re-fetch check before scrolling
+                if time.time() - last_fetch >= REFRESH_SECS:
+                    break
+
+                # Scroll to the next label (wrap around to first after last)
+                next_cols, _, _ = labels[(i + 1) % len(labels)]
+                scroll_to_next(hat, cols, next_cols)
 
     except KeyboardInterrupt:
         print("\nExiting.")
